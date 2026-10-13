@@ -77,6 +77,9 @@ export interface EarningsData {
 
 export interface ChartPoint {
   t: number;
+  o: number;
+  h: number;
+  l: number;
   c: number;
   v: number;
 }
@@ -84,6 +87,8 @@ export interface ChartPoint {
 export interface ChartData {
   symbol: string;
   range: string;
+  interval: Interval;
+  /** True when each bar covers less than a day. */
   intraday: boolean;
   currency: string;
   timezone: string;
@@ -122,6 +127,31 @@ export interface Profile {
 export const RANGES = ['1D', '5D', '1M', '6M', 'YTD', '1Y', '5Y', 'MAX'] as const;
 export type Range = (typeof RANGES)[number];
 
+export type Interval = '1m' | '5m' | '15m' | '30m' | '1h' | '1d' | '1wk' | '1mo';
+
+export const INTERVAL_LABEL: Record<Interval, string> = {
+  '1m': '1 min',
+  '5m': '5 min',
+  '15m': '15 min',
+  '30m': '30 min',
+  '1h': '1 hour',
+  '1d': 'Day',
+  '1wk': 'Week',
+  '1mo': 'Month',
+};
+
+/** Bar sizes offered for each range, and the one used by default. Mirrors RANGES in server/index.js. */
+export const RANGE_INTERVALS: Record<Range, { options: Interval[]; default: Interval }> = {
+  '1D': { options: ['1m', '5m', '15m', '1h'], default: '5m' },
+  '5D': { options: ['1m', '5m', '15m', '30m', '1h'], default: '30m' },
+  '1M': { options: ['15m', '1h', '1d'], default: '1d' },
+  '6M': { options: ['1h', '1d'], default: '1d' },
+  YTD: { options: ['1h', '1d'], default: '1d' },
+  '1Y': { options: ['1h', '1d', '1wk'], default: '1d' },
+  '5Y': { options: ['1d', '1wk'], default: '1wk' },
+  MAX: { options: ['1wk', '1mo'], default: '1mo' },
+};
+
 async function get<T>(url: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, { signal });
   if (!res.ok) {
@@ -140,8 +170,8 @@ export const api = {
     symbols.length
       ? get<Record<string, Spark | null>>(`/api/sparks?symbols=${list(symbols)}`, signal)
       : Promise.resolve({} as Record<string, Spark | null>),
-  chart: (symbol: string, range: Range, signal?: AbortSignal) =>
-    get<ChartData>(`/api/chart/${encodeURIComponent(symbol)}?range=${range}`, signal),
+  chart: (symbol: string, range: Range, interval: Interval, signal?: AbortSignal) =>
+    get<ChartData>(`/api/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`, signal),
   search: (q: string, signal?: AbortSignal) => get<SearchResult[]>(`/api/search?q=${encodeURIComponent(q)}`, signal),
   movers: (signal?: AbortSignal) => get<Movers>('/api/movers', signal),
   sectors: (symbols: string[], signal?: AbortSignal) =>

@@ -72,26 +72,33 @@ function trimQuote(q) {
 }
 
 const DAY = 86_400_000;
+// `intervals` lists the bar sizes offered for each range; `interval` is the default.
+// Yahoo keeps minute bars for about a week and 5-30 minute bars for 60 days.
 const RANGES = {
-  '1D': { back: 5 * DAY, interval: '5m', sessions: 1 },
-  '5D': { back: 9 * DAY, interval: '30m', sessions: 5 },
-  '1M': { back: 31 * DAY, interval: '1d' },
-  '6M': { back: 183 * DAY, interval: '1d' },
-  YTD: { ytd: true, interval: '1d' },
-  '1Y': { back: 366 * DAY, interval: '1d' },
-  '5Y': { back: 5 * 366 * DAY, interval: '1wk' },
-  MAX: { max: true, interval: '1mo' },
+  '1D': { back: 5 * DAY, interval: '5m', intervals: ['1m', '5m', '15m', '1h'], sessions: 1 },
+  '5D': { back: 9 * DAY, interval: '30m', intervals: ['1m', '5m', '15m', '30m', '1h'], sessions: 5 },
+  '1M': { back: 31 * DAY, interval: '1d', intervals: ['15m', '1h', '1d'] },
+  '6M': { back: 183 * DAY, interval: '1d', intervals: ['1h', '1d'] },
+  YTD: { ytd: true, interval: '1d', intervals: ['1h', '1d'] },
+  '1Y': { back: 366 * DAY, interval: '1d', intervals: ['1h', '1d', '1wk'] },
+  '5Y': { back: 5 * 366 * DAY, interval: '1wk', intervals: ['1d', '1wk'] },
+  MAX: { max: true, interval: '1mo', intervals: ['1wk', '1mo'] },
 };
+const INTERVAL_MS = { '1m': 60_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000, '1h': 3_600_000 };
+const INTRADAY = new Set(Object.keys(INTERVAL_MS));
 
 async function loadChart(symbol, rangeKey, intervalOverride) {
   const range = RANGES[rangeKey];
+  const interval = intervalOverride ?? range.interval;
   const now = Date.now();
+  // A single request for minute bars may span at most about a week.
+  const back = interval === '1m' ? Math.min(range.back, 7 * DAY) : range.back;
   const period1 = range.max
     ? new Date('1970-01-02')
     : range.ytd
       ? new Date(Date.UTC(new Date().getUTCFullYear() - 1, 11, 25))
-      : new Date(now - range.back);
-  const res = await yf.chart(symbol, { period1, interval: intervalOverride ?? range.interval, includePrePost: false });
+      : new Date(now - back);
+  const res = await yf.chart(symbol, { period1, interval, includePrePost: false });
   const meta = res.meta ?? {};
   const offsetMs = (meta.gmtoffset ?? 0) * 1000;
   const lastRegular = meta.regularMarketTime ? new Date(meta.regularMarketTime).getTime() : Infinity;
@@ -99,12 +106,33 @@ async function loadChart(symbol, rangeKey, intervalOverride) {
 
   let points = (res.quotes ?? [])
     .filter((q) => q.close != null)
-    .map((q) => ({ t: new Date(q.date).getTime(), c: q.close, v: q.volume ?? 0 }));
+    .map((q) => ({
+      t: new Date(q.date).getTime(),
+      o: q.open ?? q.close,
+      h: q.high ?? q.close,
+      l: q.low ?? q.close,
+      c: q.close,
+      v: q.volume ?? 0,
+    }));
+
+  // Drop the stray after-hours tick Yahoo appends to intraday data.
+  if (INTRADAY.has(interval)) {
+    points = points.filter((p) => p.t <= lastRegular);
+    // While the market is open Yahoo also appends the latest trade as a bar of its own.
+    // Fold it into the bar that is still forming so it doesn't show as an extra flat candle.
+    const last = points.at(-1);
+    const prev = points.at(-2);
+    if (last && prev && last.t - prev.t < INTERVAL_MS[interval]) {
+      prev.c = last.c;
+      prev.h = Math.max(prev.h, last.h);
+      prev.l = Math.min(prev.l, last.l);
+      points.pop();
+    }
+  }
 
   let baseline = null;
   if (range.sessions) {
-    // Drop the stray after-hours tick Yahoo appends, then keep the last N sessions.
-    points = points.filter((p) => p.t <= lastRegular);
+    // Keep the last N sessions.
     const days = [...new Set(points.map((p) => localDay(p.t)))];
     const keep = new Set(days.slice(-range.sessions));
     const before = points.filter((p) => !keep.has(localDay(p.t)));
@@ -121,7 +149,8 @@ async function loadChart(symbol, rangeKey, intervalOverride) {
   return {
     symbol: meta.symbol ?? symbol,
     range: rangeKey,
-    intraday: Boolean(range.sessions),
+    interval,
+    intraday: INTRADAY.has(interval),
     currency: meta.currency ?? 'USD',
     timezone: meta.exchangeTimezoneName ?? 'America/New_York',
     baseline,
@@ -164,8 +193,10 @@ api.get('/chart/:symbol', async (req, res) => {
   const symbol = String(req.params.symbol).toUpperCase();
   const range = String(req.query.range ?? '1D').toUpperCase();
   if (!SYMBOL_RE.test(symbol) || !RANGES[range]) return res.status(400).json({ error: 'Bad symbol or range' });
-  const ttl = RANGES[range].sessions ? 60_000 : 10 * 60_000;
-  res.json(await cached(`chart:${symbol}:${range}`, ttl, () => loadChart(symbol, range)));
+  const interval = req.query.interval ? String(req.query.interval) : RANGES[range].interval;
+  if (!RANGES[range].intervals.includes(interval)) return res.status(400).json({ error: 'That interval is not available for this range' });
+  // Held just under the page's one-minute refresh so every refresh gets fresh data.
+  res.json(await cached(`chart:${symbol}:${range}:${interval}`, 50_000, () => loadChart(symbol, range, interval)));
 });
 
 api.get('/search', async (req, res) => {

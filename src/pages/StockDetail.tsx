@@ -1,11 +1,13 @@
 import { useState } from 'react';
-import { api, RANGES, type NewsItem, type Range } from '../api';
+import { api, INTERVAL_LABEL, RANGE_INTERVALS, RANGES, type Interval, type NewsItem, type Range } from '../api';
 import { Delta } from '../components/Delta';
 import { PageHead } from '../components/PageHead';
-import { PriceChart } from '../components/PriceChart';
+import { PriceChart, type ChartType } from '../components/PriceChart';
 import { fmtCompact, fmtNumber, fmtPrice } from '../format';
-import { usePolling } from '../hooks';
+import { useLocalStorage, usePolling } from '../hooks';
 import { RangeBar } from './Watchlist';
+
+const REFRESH_MS = 60_000;
 
 interface Props {
   symbol: string;
@@ -15,15 +17,21 @@ interface Props {
 
 export function StockDetail({ symbol, watched, onToggleWatch }: Props) {
   const [range, setRange] = useState<Range>('1D');
-  const quote = usePolling(`quote:${symbol}`, (signal) => api.quotes([symbol], signal), 30_000);
-  const chart = usePolling(`chart:${symbol}:${range}`, (signal) => api.chart(symbol, range, signal), range === '1D' ? 60_000 : 0);
+  // The price and the chart refresh together, once a minute, on every range and interval.
+  const quote = usePolling(`quote:${symbol}`, (signal) => api.quotes([symbol], signal), REFRESH_MS);
+  // A bar size chosen for one range carries over to the next only where that range offers it.
+  const [pickedInterval, setPickedInterval] = useState<Interval | null>(null);
+  const intervals = RANGE_INTERVALS[range];
+  const interval = pickedInterval && intervals.options.includes(pickedInterval) ? pickedInterval : intervals.default;
+  const [chartType, setChartType] = useLocalStorage<ChartType>('chart.type', 'line');
+  const chart = usePolling(`chart:${symbol}:${range}:${interval}`, (signal) => api.chart(symbol, range, interval, signal), REFRESH_MS);
   const profile = usePolling(`profile:${symbol}`, (signal) => api.profile(symbol, signal));
   const news = usePolling(`news:${symbol}`, (signal) => api.news(symbol, signal), 5 * 60_000);
   // Today's bar is still moving during the session, so it is labelled "Today" rather than a close.
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(Date.now());
 
   const q = quote.data?.[0];
-  const chartData = chart.data && chart.data.range === range && chart.data.symbol === (q?.symbol ?? symbol) ? chart.data : undefined;
+  const chartData = chart.data && chart.data.range === range && chart.data.interval === interval && chart.data.symbol === (q?.symbol ?? symbol) ? chart.data : undefined;
 
   if (!q && !quote.loading && !quote.error) {
     return (
@@ -112,8 +120,28 @@ export function StockDetail({ symbol, watched, onToggleWatch }: Props) {
           </div>
         </div>
 
+        <div className="chart-controls">
+          <div className="group-by">
+            <span className="sub">Interval</span>
+            <div className="tabs" role="tablist" aria-label="Bar interval">
+              {intervals.options.map((i) => (
+                <button key={i} role="tab" aria-selected={i === interval} className={i === interval ? 'active' : ''} onClick={() => setPickedInterval(i)}>
+                  {INTERVAL_LABEL[i]}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="tabs" role="tablist" aria-label="Chart type">
+            {(['line', 'candles'] as const).map((t) => (
+              <button key={t} role="tab" aria-selected={t === chartType} className={t === chartType ? 'active' : ''} onClick={() => setChartType(t)}>
+                {t === 'line' ? 'Line' : 'Candles'}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {chartData ? (
-          <PriceChart data={chartData} />
+          <PriceChart data={chartData} type={chartType} />
         ) : (
           <div className="chart-empty">{chart.error ? `Couldn't load the chart: ${chart.error}` : 'Loading chart…'}</div>
         )}

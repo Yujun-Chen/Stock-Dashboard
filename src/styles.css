@@ -1149,3 +1149,13 @@ a:focus-visible {
 .news-day .cal-more {
   padding: 2px 10px 0;
 }
+
+/* ---------- chart controls ---------- */
+.chart-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
